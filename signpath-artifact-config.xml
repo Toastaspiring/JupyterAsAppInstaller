@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  SignPath artifact configuration for Jupyter Launcher.
+  Upload this file in your SignPath project under:
+    Project > Artifact Configurations > Add > Paste XML
+  Set the slug to: installer
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <!-- Inno Setup produces a standard PE executable — sign it directly -->
+  <pe-binary>
+    <authenticode-sign />
+  </pe-binary>
+</artifact-configuration>
