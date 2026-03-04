@@ -1,6 +1,6 @@
 [Setup]
 AppName=Jupyter Launcher
-AppVersion=1.1
+AppVersion=1.2
 AppPublisher=Louis
 DefaultDirName={localappdata}\JupyterLauncher
 DefaultGroupName=Jupyter Launcher
