@@ -9,6 +9,7 @@ import sys
 import json
 import winreg
 import threading
+import queue
 from pathlib import Path
 
 import pystray
@@ -29,11 +30,19 @@ else:
 ICON_PATH   = RESOURCE_DIR / "jupyter.ico"
 CONFIG_PATH = CONFIG_DIR   / "config.json"
 
+# ── Dialogs (defined early — used by load_config) ──────────────────────────────
+def show_error(msg):
+    ctypes.windll.user32.MessageBoxW(0, msg, "Jupyter Launcher", 0x10)
+
+def show_info(msg):
+    ctypes.windll.user32.MessageBoxW(0, msg, "Jupyter Launcher", 0x40)
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     "notebook_dir": str(Path.home() / "Documents"),
     "conda_env":    None,
     "auto_start":   False,
+    "port":         8888,
 }
 
 def load_config():
@@ -41,19 +50,19 @@ def load_config():
     if CONFIG_PATH.exists():
         try:
             cfg.update(json.loads(CONFIG_PATH.read_text()))
-        except Exception:
-            pass
+        except Exception as e:
+            show_error(f"Config file is corrupted and was reset to defaults.\n\n({e})")
     return cfg
 
 def save_config(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
 
 # ── Network ────────────────────────────────────────────────────────────────────
-def is_port_open(port=8888):
+def is_port_open(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('localhost', port)) == 0
 
-def wait_for_port(port=8888, timeout=30):
+def wait_for_port(port, timeout=30):
     """Poll every 500 ms until Jupyter is up — no fixed sleep."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -98,6 +107,7 @@ def start_server(cfg):
     cmd += [
         "notebook", "--no-browser",
         f"--notebook-dir={cfg['notebook_dir']}",
+        f"--port={cfg['port']}",
         "--NotebookApp.token=''",
         "--NotebookApp.password=''",
     ]
@@ -108,11 +118,11 @@ def stop_server():
     global _server_proc
     if _server_proc:
         _server_proc.terminate()
+        try:
+            _server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _server_proc.kill()
         _server_proc = None
-    subprocess.run(
-        ["taskkill", "/F", "/IM", "jupyter-notebook.exe"],
-        creationflags=0x08000000, capture_output=True
-    )
 
 # ── Auto-start ─────────────────────────────────────────────────────────────────
 _RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -139,46 +149,79 @@ def set_autostart(enabled):
             pass
     winreg.CloseKey(key)
 
-# ── Dialogs ────────────────────────────────────────────────────────────────────
-def show_error(msg):
-    ctypes.windll.user32.MessageBoxW(0, msg, "Jupyter Launcher", 0x10)
+# ── Tkinter UI thread ──────────────────────────────────────────────────────────
+# All Tkinter windows run on a single dedicated thread to avoid thread-safety issues.
+_ui_queue = queue.Queue()
 
-def show_info(msg):
-    ctypes.windll.user32.MessageBoxW(0, msg, "Jupyter Launcher", 0x40)
+def _ui_worker():
+    while True:
+        func, result_holder, done_event = _ui_queue.get()
+        result_holder[0] = func()
+        done_event.set()
+
+threading.Thread(target=_ui_worker, daemon=True).start()
+
+def _run_in_ui(func):
+    """Run a Tkinter callable on the dedicated UI thread and return its result."""
+    result_holder = [None]
+    done_event = threading.Event()
+    _ui_queue.put((func, result_holder, done_event))
+    done_event.wait()
+    return result_holder[0]
 
 def pick_folder(current):
-    """Open a folder-picker dialog (runs in a thread to avoid blocking the tray)."""
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes('-topmost', True)
-    folder = filedialog.askdirectory(title="Select Notebook Directory", initialdir=current)
-    root.destroy()
-    return folder or None
+    def _fn():
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', True)
+        folder = filedialog.askdirectory(title="Select Notebook Directory", initialdir=current)
+        root.destroy()
+        return folder or None
+    return _run_in_ui(_fn)
 
 def pick_conda_env(envs):
-    selected = [None]
-    root = tk.Tk()
-    root.title("Select Conda Environment")
-    root.resizable(False, False)
-    root.wm_attributes('-topmost', True)
-    tk.Label(root, text="Select conda environment:", padx=10, pady=8).pack()
-    var = tk.StringVar(value=envs[0])
-    ttk.Combobox(root, textvariable=var, values=envs, state="readonly", width=32).pack(padx=10)
-    def ok():
-        selected[0] = var.get()
-        root.destroy()
-    frame = tk.Frame(root)
-    frame.pack(pady=8)
-    tk.Button(frame, text="OK",     command=ok,           width=10).pack(side=tk.LEFT, padx=4)
-    tk.Button(frame, text="Cancel", command=root.destroy, width=10).pack(side=tk.LEFT, padx=4)
-    root.mainloop()
-    return selected[0]
+    def _fn():
+        selected = [None]
+        root = tk.Tk()
+        root.title("Select Conda Environment")
+        root.resizable(False, False)
+        root.wm_attributes('-topmost', True)
+        tk.Label(root, text="Select conda environment:", padx=10, pady=8).pack()
+        var = tk.StringVar(value=envs[0])
+        ttk.Combobox(root, textvariable=var, values=envs, state="readonly", width=32).pack(padx=10)
+        def ok():
+            selected[0] = var.get()
+            root.destroy()
+        frame = tk.Frame(root)
+        frame.pack(pady=8)
+        tk.Button(frame, text="OK",     command=ok,           width=10).pack(side=tk.LEFT, padx=4)
+        tk.Button(frame, text="Cancel", command=root.destroy, width=10).pack(side=tk.LEFT, padx=4)
+        root.mainloop()
+        return selected[0]
+    return _run_in_ui(_fn)
 
 # ── Tray ───────────────────────────────────────────────────────────────────────
 def build_tray_menu(cfg):
 
     def open_jupyter(_icon, _item):
-        webbrowser.open("http://localhost:8888")
+        webbrowser.open(f"http://localhost:{cfg['port']}")
+
+    def restart(_icon, _item):
+        def _run():
+            _icon.title = "Jupyter Launcher — Stopping…"
+            stop_server()
+            _icon.title = "Jupyter Launcher — Starting…"
+            if not start_server(cfg):
+                _icon.title = "Jupyter Launcher — Error"
+                return
+            if not wait_for_port(cfg["port"], timeout=30):
+                show_error("Jupyter did not respond within 30 seconds.")
+                stop_server()
+                _icon.title = "Jupyter Launcher — Error"
+                return
+            _icon.title = "Jupyter Launcher — Running"
+            webbrowser.open(f"http://localhost:{cfg['port']}")
+        threading.Thread(target=_run, daemon=True).start()
 
     def change_dir(_icon, _item):
         def _run():
@@ -215,6 +258,7 @@ def build_tray_menu(cfg):
     return pystray.Menu(
         pystray.MenuItem("Open Jupyter",              open_jupyter, default=True),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Restart Server",            restart),
         pystray.MenuItem("Change Notebook Directory", change_dir),
         pystray.MenuItem("Select Conda Environment",  change_env),
         pystray.MenuItem(
@@ -235,29 +279,33 @@ def make_tray_image():
 # ── Main ───────────────────────────────────────────────────────────────────────
 def launch():
     cfg = load_config()
+    port = cfg["port"]
 
-    if is_port_open():
+    if is_port_open(port):
         # Server already up — just open the browser, don't start a second tray
-        webbrowser.open("http://localhost:8888")
+        webbrowser.open(f"http://localhost:{port}")
         return
 
-    if not start_server(cfg):
-        return
-
-    if not wait_for_port(timeout=30):
-        show_error("Jupyter did not respond within 30 seconds.")
-        stop_server()
-        return
-
-    webbrowser.open("http://localhost:8888")
-
-    # Stay alive in the system tray
     icon = pystray.Icon(
         "JupyterLauncher",
         make_tray_image(),
-        "Jupyter Launcher",
+        "Jupyter Launcher — Starting…",
         build_tray_menu(cfg),
     )
+
+    def _start():
+        if not start_server(cfg):
+            icon.stop()
+            return
+        if not wait_for_port(port, timeout=30):
+            show_error("Jupyter did not respond within 30 seconds.")
+            stop_server()
+            icon.stop()
+            return
+        icon.title = "Jupyter Launcher — Running"
+        webbrowser.open(f"http://localhost:{port}")
+
+    threading.Thread(target=_start, daemon=True).start()
     icon.run()
 
 
