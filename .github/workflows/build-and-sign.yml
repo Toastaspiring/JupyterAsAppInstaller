@@ -75,5 +75,9 @@ jobs:
             Download and run **JupyterLauncher-Setup.exe**.
             This installer is digitally signed — no SmartScreen warning.
 
-            ## Requirements
-            Python must be installed. The installer will offer to run `pip install notebook` if Jupyter is not found.
+            ## What the installer does
+            - Detects Python — if missing, downloads and installs **Python 3.12** automatically
+            - Detects Jupyter — if missing, runs `pip install notebook` automatically
+            - Adds the Python Scripts folder to your **PATH** so `jupyter` is always found
+            - Creates Desktop & Start Menu shortcuts
+            - Registers in Apps & Features for clean uninstall
