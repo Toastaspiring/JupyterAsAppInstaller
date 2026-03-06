@@ -114,8 +114,39 @@ def start_server(cfg):
     _server_proc = subprocess.Popen(cmd, creationflags=0x08000000)
     return True
 
-def stop_server():
+def _shutdown_jupyter_api(port):
+    """Ask Jupyter to shut down via its REST API (graceful, no auth required)."""
+    try:
+        from urllib.request import urlopen, Request
+        req = Request(f"http://localhost:{port}/api/shutdown", method="POST")
+        urlopen(req, timeout=3)
+    except Exception:
+        pass
+
+def _close_jupyter_browser_windows():
+    """Close any top-level browser windows whose title contains 'Jupyter'."""
+    WM_CLOSE = 0x0010
+    handles = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _cb(hwnd, _):
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            if "Jupyter" in buf.value:
+                handles.append(hwnd)
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, None)
+    for hwnd in handles:
+        ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
+def stop_server(port=None):
     global _server_proc
+    if port and is_port_open(port):
+        _shutdown_jupyter_api(port)
+        time.sleep(0.5)  # let Jupyter handle the shutdown event before we kill it
     if _server_proc:
         _server_proc.terminate()
         try:
@@ -123,6 +154,7 @@ def stop_server():
         except subprocess.TimeoutExpired:
             _server_proc.kill()
         _server_proc = None
+    _close_jupyter_browser_windows()
 
 # ── Auto-start ─────────────────────────────────────────────────────────────────
 _RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -209,14 +241,14 @@ def build_tray_menu(cfg):
     def restart(_icon, _item):
         def _run():
             _icon.title = "Jupyter Launcher — Stopping…"
-            stop_server()
+            stop_server(cfg["port"])
             _icon.title = "Jupyter Launcher — Starting…"
             if not start_server(cfg):
                 _icon.title = "Jupyter Launcher — Error"
                 return
             if not wait_for_port(cfg["port"], timeout=30):
                 show_error("Jupyter did not respond within 30 seconds.")
-                stop_server()
+                stop_server(cfg["port"])
                 _icon.title = "Jupyter Launcher — Error"
                 return
             _icon.title = "Jupyter Launcher — Running"
@@ -252,7 +284,7 @@ def build_tray_menu(cfg):
         save_config(cfg)
 
     def stop_and_exit(icon, _item):
-        stop_server()
+        stop_server(cfg["port"])
         icon.stop()
 
     return pystray.Menu(
@@ -299,7 +331,7 @@ def launch():
             return
         if not wait_for_port(port, timeout=30):
             show_error("Jupyter did not respond within 30 seconds.")
-            stop_server()
+            stop_server(port)
             icon.stop()
             return
         icon.title = "Jupyter Launcher — Running"
